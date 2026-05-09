@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { collection, query, where, orderBy, getDocs, limit } from 'firebase/firestore';
+import { collection, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../firebase';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
@@ -10,38 +10,41 @@ const COLORS = ['#2563eb', '#16a34a', '#dc2626', '#ea580c', '#7c3aed', '#0891b2'
 export default function ProductDetailModal({ producto, competencia, currency, bcvRate, onClose }) {
   const [historico, setHistorico] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     (async () => {
       try {
+        // Query simple: solo filtra por producto (no requiere indice compuesto)
+        // Ordenamos en el cliente.
         const q = query(
           collection(db, 'historico_precios'),
-          where('id_producto_propio', '==', producto.id_interno),
-          orderBy('scraped_at', 'desc'),
-          limit(500)
+          where('id_producto_propio', '==', producto.id_interno)
         );
         const snap = await getDocs(q);
         const docs = snap.docs.map(d => ({
           ...d.data(),
           scraped_at: d.data().scraped_at?.toDate?.() || null,
         }));
+        // Orden ascendente por fecha
+        docs.sort((a, b) => (a.scraped_at?.getTime() || 0) - (b.scraped_at?.getTime() || 0));
         setHistorico(docs);
       } catch (err) {
         console.error('Error cargando histórico:', err);
+        setError(err.message);
       }
       setLoading(false);
     })();
   }, [producto.id_interno]);
 
-  // Pivot: convertir histórico en serie por marca, agrupado por día.
-  // X = fecha, Y = precio (en USD si currency=usd)
+  // Pivot: convertir historico en serie por marca-cadena, agrupado por dia.
   const chartData = (() => {
     const byDate = new Map();
     const marcasVistas = new Set();
 
     for (const h of historico) {
       if (!h.scraped_at) continue;
-      const dateKey = h.scraped_at.toISOString().slice(0, 10); // YYYY-MM-DD
+      const dateKey = h.scraped_at.toISOString().slice(0, 10);
       const marca = `${h.marca} (${h.cadena})`;
       marcasVistas.add(marca);
 
@@ -76,7 +79,6 @@ export default function ProductDetailModal({ producto, competencia, currency, bc
         </div>
 
         <div className="p-6 space-y-6">
-          {/* Tabla de competencia detallada */}
           <div>
             <h3 className="text-sm font-medium text-gray-900 mb-3">Precios actuales por cadena</h3>
             <div className="border border-gray-200 rounded overflow-hidden">
@@ -112,16 +114,17 @@ export default function ProductDetailModal({ producto, competencia, currency, bc
             </div>
           </div>
 
-          {/* Gráfico de tendencia */}
           <div>
             <h3 className="text-sm font-medium text-gray-900 mb-3">
               Tendencia ({currency === 'usd' ? 'USD' : 'Bs'})
             </h3>
             {loading ? (
               <div className="h-64 flex items-center justify-center text-gray-400">Cargando histórico...</div>
+            ) : error ? (
+              <div className="h-64 flex items-center justify-center text-red-500 text-sm">{error}</div>
             ) : chartData.data.length === 0 ? (
-              <div className="h-64 flex items-center justify-center text-gray-400">
-                Aún no hay suficiente historial. Vuelve después de más corridas.
+              <div className="h-64 flex items-center justify-center text-gray-400 text-sm">
+                Aún no hay suficiente historial. Cada corrida del scraper agrega datos.
               </div>
             ) : (
               <div className="h-64">
