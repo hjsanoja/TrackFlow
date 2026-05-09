@@ -1,17 +1,11 @@
 """
-Scraper de Farmatodo - versión definitiva.
+Scraper de Farmatodo.
 
-Usa el mismo patrón que la versión diagnóstica que SÍ funcionó:
-- wait_for_load_state('networkidle') con tolerancia a timeout
-- Extracción con page.evaluate() ejecutando JS directo en la página
-
-Selectores específicos (vistos en el HTML real de Farmatodo):
-- span.product-purchase__price--active   -> precio activo
-- del.product-purchase__price--original  -> precio original tachado
-- h1                                     -> nombre del producto
+Lectura de CSV tolerante a UTF-8 / UTF-8-BOM / CP1252 / Latin-1.
 """
 
 import csv
+import io
 import json
 import re
 import sys
@@ -27,28 +21,30 @@ RESULTS_PATH = PROJECT_ROOT / "resultados.json"
 DEBUG_DIR = PROJECT_ROOT / "debug"
 
 
+def read_text_robust(path: Path) -> str:
+    raw = path.read_bytes()
+    for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise RuntimeError(f"No pude decodificar {path.name}")
+
+
 def parse_price(text: str) -> float | None:
     """
-    Convierte el formato de Farmatodo a float.
-
-        Bs.262.18    -> 262.18
-        Bs.1.694.47  -> 1694.47
-
-    Regla: el ULTIMO punto es el decimal, los demás son separadores de miles.
+    Bs.262.18    -> 262.18
+    Bs.1.694.47  -> 1694.47
+    Regla: el ULTIMO punto es decimal, los demás son separadores de miles.
     """
     if not text:
         return None
-
     cleaned = re.sub(r"[^\d.]", "", text.replace("Bs.", "").replace("Bs", ""))
     if not cleaned:
         return None
-
     if cleaned.count(".") > 1:
         parts = cleaned.split(".")
-        integer_part = "".join(parts[:-1])
-        decimal_part = parts[-1]
-        cleaned = f"{integer_part}.{decimal_part}"
-
+        cleaned = f"{''.join(parts[:-1])}.{parts[-1]}"
     try:
         return float(cleaned)
     except ValueError:
@@ -71,7 +67,6 @@ def scrape_url(page, url: str, marca: str) -> dict:
         print(f"   Cargando...", flush=True)
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-        # Esperar a que termine la red (con tolerancia: si no llega a idle, seguimos)
         print(f"   Esperando que cargue contenido...", flush=True)
         try:
             page.wait_for_load_state("networkidle", timeout=15000)
@@ -79,8 +74,6 @@ def scrape_url(page, url: str, marca: str) -> dict:
             pass
         time.sleep(2)
 
-        # Extraer todo de una sola vez con JS directo en la página.
-        # Este es el mismo enfoque del diagnóstico que SÍ encontró los elementos.
         print(f"   Extrayendo datos...", flush=True)
         data = page.evaluate("""
             () => {
@@ -107,8 +100,7 @@ def scrape_url(page, url: str, marca: str) -> dict:
             result["precio_full_bs"] = precio_activo
             result["tiene_descuento"] = False
         else:
-            result["error"] = "No se encontraron los selectores de precio en la página"
-            # Screenshot para diagnostico
+            result["error"] = "No se encontraron los selectores de precio"
             DEBUG_DIR.mkdir(exist_ok=True)
             try:
                 shot = DEBUG_DIR / f"sin_precio_{marca.replace(' ', '_')}.png"
@@ -130,15 +122,17 @@ def main():
         print(f"ERROR: no encuentro {CSV_PATH}")
         sys.exit(1)
 
+    text = read_text_robust(CSV_PATH)
+    sample = text[:2048]
+    delim = ";" if sample.count(";") > sample.count(",") else ","
+
     filas = []
-    with open(CSV_PATH, encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter=";")
-        for row in reader:
-            if (
-                row.get("cadena", "").strip().lower() == "farmatodo"
-                and row.get("activo", "").strip().lower() == "si"
-            ):
-                filas.append(row)
+    for row in csv.DictReader(io.StringIO(text), delimiter=delim):
+        if (
+            row.get("cadena", "").strip().lower() == "farmatodo"
+            and row.get("activo", "").strip().lower() == "si"
+        ):
+            filas.append(row)
 
     if not filas:
         print("No hay filas de Farmatodo activas en el CSV.")
