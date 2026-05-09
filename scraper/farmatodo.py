@@ -1,63 +1,45 @@
 """
-Scraper de Farmatodo.
+Scraper de Farmatodo - versión 2.
 
-Lee productos_competencia.csv, abre cada URL marcada como cadena=Farmatodo,
-extrae el precio y lo imprime por pantalla.
-
-Uso:
-    python farmatodo.py
-
-Requiere:
-    pip install playwright
-    playwright install chromium
+Cambios respecto a la versión anterior:
+- Usa 'domcontentloaded' en lugar de 'networkidle' (más rápido).
+- Imprime cada paso para que veas el progreso.
+- Toma screenshot cuando falla.
+- Bloquea imágenes, fonts y video para acelerar.
 """
 
 import csv
 import re
 import sys
+import time
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 
-# Ruta al CSV. Asume que el CSV está en la raíz del proyecto, un nivel arriba.
 CSV_PATH = Path(__file__).parent.parent / "productos_competencia.csv"
+SCREENSHOTS_DIR = Path(__file__).parent.parent / "debug_screenshots"
 
 
 def parse_price(text: str) -> float | None:
-    """
-    Convierte un string como 'Bs.6.705,00' o 'Bs. 1.234,56' a float.
-    Farmatodo usa formato venezolano: punto como separador de miles,
-    coma como separador decimal.
-    """
     if not text:
         return None
-
-    # Quitar todo lo que no sea dígito, punto o coma
     cleaned = re.sub(r"[^\d.,]", "", text)
     if not cleaned:
         return None
-
-    # Si tiene coma, la coma es el decimal y los puntos son miles
     if "," in cleaned:
         cleaned = cleaned.replace(".", "").replace(",", ".")
-    # Si solo tiene puntos y hay más de uno, los puntos son miles
     elif cleaned.count(".") > 1:
         cleaned = cleaned.replace(".", "")
-
     try:
         return float(cleaned)
     except ValueError:
         return None
 
 
-def scrape_farmatodo_url(page, url: str) -> dict:
-    """
-    Abre la URL en Farmatodo y extrae nombre, precio full y precio con descuento.
-    Devuelve un dict con los datos. Si falla, los campos vienen en None
-    y 'error' tiene el motivo.
-    """
+def scrape_url(page, url: str, marca: str) -> dict:
     result = {
         "url": url,
+        "marca": marca,
         "nombre": None,
         "precio_full_bs": None,
         "precio_desc_bs": None,
@@ -65,67 +47,57 @@ def scrape_farmatodo_url(page, url: str) -> dict:
     }
 
     try:
-        # networkidle: espera a que no haya peticiones de red por 500ms.
-        # Farmatodo carga el precio con JS, así que esto es necesario.
-        page.goto(url, wait_until="networkidle", timeout=30000)
+        print(f"   [1/4] Navegando a la URL...", flush=True)
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-        # Selectores tolerantes: buscamos por varias estrategias y usamos
-        # la primera que encuentre algo. Esto sobrevive a cambios menores
-        # en el HTML.
-        nombre_sel = [
-            "h1",
-            "[class*='product-title']",
-            "[class*='product-name']",
-        ]
-        for sel in nombre_sel:
-            try:
-                el = page.locator(sel).first
-                if el.count() > 0:
-                    text = el.inner_text(timeout=2000).strip()
-                    if text:
-                        result["nombre"] = text
-                        break
-            except PlaywrightTimeout:
-                continue
+        print(f"   [2/4] Esperando que cargue el precio...", flush=True)
+        try:
+            page.wait_for_function(
+                """() => {
+                    const text = document.body.innerText || '';
+                    return /Bs\\s*\\.?\\s*[\\d.,]+/.test(text);
+                }""",
+                timeout=15000,
+            )
+        except PlaywrightTimeout:
+            result["error"] = "Precio no apareció en 15 segundos"
+            return result
 
-        # Para el precio, capturamos todos los elementos que parezcan precio
-        # y elegimos según presencia de descuento.
-        # Farmatodo suele usar clases con 'price' en el nombre.
-        price_locators = page.locator(
-            "[class*='price'], [class*='Price'], [class*='precio']"
+        time.sleep(1)
+
+        print(f"   [3/4] Extrayendo nombre del producto...", flush=True)
+        try:
+            h1 = page.locator("h1").first
+            if h1.count() > 0:
+                result["nombre"] = h1.inner_text(timeout=2000).strip()
+        except PlaywrightTimeout:
+            pass
+
+        print(f"   [4/4] Extrayendo precios...", flush=True)
+        body_text = page.locator("body").inner_text(timeout=5000)
+
+        precio_matches = re.findall(
+            r"Bs\.?\s*[\d]{1,3}(?:\.\d{3})*(?:,\d{1,2})?", body_text
         )
-        textos_precio = []
-        for i in range(min(price_locators.count(), 20)):
-            try:
-                t = price_locators.nth(i).inner_text(timeout=1000).strip()
-                if t and ("Bs" in t or "$" in t or re.search(r"\d", t)):
-                    textos_precio.append(t)
-            except PlaywrightTimeout:
-                continue
 
-        # Filtrar a precios con dígitos y signo de Bs
-        precios_validos = []
-        for t in textos_precio:
-            p = parse_price(t)
-            if p and p > 0:
-                precios_validos.append((t, p))
+        precios_encontrados = []
+        for m in precio_matches:
+            p = parse_price(m)
+            if p and 0.01 <= p <= 100_000_000:
+                precios_encontrados.append(p)
 
-        if precios_validos:
-            # Asunción: el primer precio que aparece es el "principal mostrado".
-            # Si hay varios distintos, el menor suele ser el de descuento y el
-            # mayor el full. Esto lo afinaremos cuando veamos un caso real.
-            valores = sorted({p for _, p in precios_validos})
-            if len(valores) == 1:
-                result["precio_full_bs"] = valores[0]
+        if precios_encontrados:
+            unicos = sorted(set(precios_encontrados))
+            if len(unicos) == 1:
+                result["precio_full_bs"] = unicos[0]
             else:
-                result["precio_full_bs"] = valores[-1]
-                result["precio_desc_bs"] = valores[0]
+                result["precio_full_bs"] = unicos[-1]
+                result["precio_desc_bs"] = unicos[0]
+        else:
+            result["error"] = "No se encontraron precios en el texto de la página"
 
-        if result["precio_full_bs"] is None:
-            result["error"] = "No se encontró precio en la página"
-
-    except PlaywrightTimeout:
-        result["error"] = "Timeout al cargar la página"
+    except PlaywrightTimeout as e:
+        result["error"] = f"Timeout: {e}"
     except Exception as e:
         result["error"] = f"{type(e).__name__}: {e}"
 
@@ -135,16 +107,18 @@ def scrape_farmatodo_url(page, url: str) -> dict:
 def main():
     if not CSV_PATH.exists():
         print(f"ERROR: no encuentro {CSV_PATH}")
-        print("Pon el archivo productos_competencia.csv en la raíz del proyecto.")
         sys.exit(1)
 
-    # Leer CSV (separador ;)
+    SCREENSHOTS_DIR.mkdir(exist_ok=True)
+
     filas = []
     with open(CSV_PATH, encoding="utf-8") as f:
         reader = csv.DictReader(f, delimiter=";")
         for row in reader:
-            if row.get("cadena", "").strip().lower() == "farmatodo" and \
-               row.get("activo", "").strip().lower() == "si":
+            if (
+                row.get("cadena", "").strip().lower() == "farmatodo"
+                and row.get("activo", "").strip().lower() == "si"
+            ):
                 filas.append(row)
 
     if not filas:
@@ -152,6 +126,7 @@ def main():
         sys.exit(0)
 
     print(f"Voy a scrapear {len(filas)} URLs de Farmatodo...\n")
+    inicio_global = time.time()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -162,15 +137,33 @@ def main():
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
             viewport={"width": 1366, "height": 768},
+            locale="es-VE",
         )
         page = context.new_page()
 
-        for fila in filas:
-            print(f"-> {fila['marca']} ({fila['tipo']})")
-            r = scrape_farmatodo_url(page, fila["url"])
+        page.route(
+            "**/*",
+            lambda route: route.abort()
+            if route.request.resource_type in ("image", "media", "font")
+            else route.continue_(),
+        )
+
+        for i, fila in enumerate(filas, 1):
+            print(f"[{i}/{len(filas)}] -> {fila['marca']} ({fila['tipo']})", flush=True)
+            inicio = time.time()
+            r = scrape_url(page, fila["url"], fila["marca"])
+            duracion = time.time() - inicio
+
             if r["error"]:
-                print(f"   ERROR: {r['error']}")
+                print(f"   ERROR ({duracion:.1f}s): {r['error']}")
+                screenshot_path = SCREENSHOTS_DIR / f"error_{fila['marca'].replace(' ', '_')}.png"
+                try:
+                    page.screenshot(path=str(screenshot_path), full_page=True)
+                    print(f"   Screenshot guardado: {screenshot_path}")
+                except Exception as e:
+                    print(f"   No pude tomar screenshot: {e}")
             else:
+                print(f"   OK ({duracion:.1f}s)")
                 print(f"   Nombre: {r['nombre']}")
                 if r["precio_desc_bs"]:
                     print(f"   Precio full:      Bs {r['precio_full_bs']:,.2f}")
@@ -180,6 +173,8 @@ def main():
             print()
 
         browser.close()
+
+    print(f"Total: {time.time() - inicio_global:.1f}s")
 
 
 if __name__ == "__main__":
