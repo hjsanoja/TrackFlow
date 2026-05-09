@@ -1,0 +1,4 @@
+id_producto_propio;cadena;tipo;marca;url;activo
+P001;Farmatodo;propio;La Sante;https://www.farmatodo.com.ve/producto/111243559-acetaminofen-650-mg-x-10-tabletas-la-sante;si
+P001;Farmatodo;alternativa;Calox;https://www.farmatodo.com.ve/producto/114592534-acetaminofen-650mg-10-tabletas-calox;si
+P001;Farmatodo;alternativa;Atamel;https://www.farmatodo.com.ve/producto/114994402-acetaminofen-500-mg-atamel-x-20-tabletas;si
