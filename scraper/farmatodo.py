@@ -1,5 +1,5 @@
 """
-Scraper de Farmatodo.
+Scraper de Farmatodo. Hernando Sanoja
 
 Lectura de CSV tolerante a UTF-8 / UTF-8-BOM / CP1252 / Latin-1.
 """
