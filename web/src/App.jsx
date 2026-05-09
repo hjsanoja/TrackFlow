@@ -6,46 +6,39 @@ import { auth, db } from './firebase';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 
+function emailToDocId(email) {
+  return email.toLowerCase().replace('@', '_at_').replaceAll('.', '_');
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [userDoc, setUserDoc] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [debugMessage, setDebugMessage] = useState('');
 
   useEffect(() => {
-    console.log('[App] montando, escuchando auth...');
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
-      console.log('[App] onAuthStateChanged disparado. Usuario:', firebaseUser?.email);
-
       if (firebaseUser) {
-        const docId = firebaseUser.email.toLowerCase().replace('@', '_at_').replaceAll('.', '_');
-        console.log('[App] Buscando doc Firestore con ID:', docId);
-
         try {
+          const docId = emailToDocId(firebaseUser.email);
           const snap = await getDoc(doc(db, 'usuarios', docId));
-          console.log('[App] snap.exists():', snap.exists());
           if (snap.exists()) {
-            console.log('[App] snap.data():', snap.data());
             const data = snap.data();
-
-            if (data.activo === true || data.activo === 'si' || data.activo === 'sí') {
-              console.log('[App] Usuario activo. Login OK.');
+            const isActive = data.activo === true || data.activo === 'si' || data.activo === 'sí';
+            if (isActive) {
               setUser(firebaseUser);
               setUserDoc(data);
             } else {
-              console.warn('[App] Usuario existe pero activo es:', data.activo);
-              setDebugMessage(`Usuario encontrado pero campo activo = ${JSON.stringify(data.activo)}`);
               await signOut(auth);
+              alert('Tu usuario está inactivo. Contacta al administrador.');
             }
           } else {
-            console.warn('[App] No se encontró el documento del usuario en Firestore.');
-            setDebugMessage(`No se encontró el documento en usuarios/${docId}`);
             await signOut(auth);
+            alert('Tu usuario no está registrado. Contacta al administrador.');
           }
         } catch (err) {
-          console.error('[App] Error al cargar perfil:', err);
-          setDebugMessage(`Error al leer Firestore: ${err.code} - ${err.message}`);
+          console.error('Error al cargar perfil:', err);
           await signOut(auth);
+          alert('Error al cargar perfil. Recarga la página.');
         }
       } else {
         setUser(null);
@@ -65,17 +58,10 @@ export default function App() {
   }
 
   return (
-    <>
-      {debugMessage && (
-        <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2 text-sm text-yellow-800">
-          DEBUG: {debugMessage}
-        </div>
-      )}
-      <Routes>
-        <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
-        <Route path="/" element={user ? <Dashboard user={user} userDoc={userDoc} /> : <Navigate to="/login" />} />
-        <Route path="*" element={<Navigate to="/" />} />
-      </Routes>
-    </>
+    <Routes>
+      <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
+      <Route path="/" element={user ? <Dashboard user={user} userDoc={userDoc} /> : <Navigate to="/login" />} />
+      <Route path="*" element={<Navigate to="/" />} />
+    </Routes>
   );
 }
