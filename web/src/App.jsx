@@ -5,6 +5,8 @@ import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
+import Productos from './pages/Productos';
+import Layout from './components/Layout';
 
 function emailToDocId(email) {
   return email.toLowerCase().replace('@', '_at_').replaceAll('.', '_');
@@ -29,16 +31,15 @@ export default function App() {
               setUserDoc(data);
             } else {
               await signOut(auth);
-              alert('Tu usuario está inactivo. Contacta al administrador.');
+              alert('Tu usuario está inactivo.');
             }
           } else {
             await signOut(auth);
-            alert('Tu usuario no está registrado. Contacta al administrador.');
+            alert('Tu usuario no está registrado.');
           }
         } catch (err) {
-          console.error('Error al cargar perfil:', err);
+          console.error('Error:', err);
           await signOut(auth);
-          alert('Error al cargar perfil. Recarga la página.');
         }
       } else {
         setUser(null);
@@ -57,11 +58,28 @@ export default function App() {
     );
   }
 
+  if (!user) {
+    return (
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="*" element={<Navigate to="/login" />} />
+      </Routes>
+    );
+  }
+
+  const isAdmin = userDoc?.rol === 'administrador';
+
   return (
-    <Routes>
-      <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
-      <Route path="/" element={user ? <Dashboard user={user} userDoc={userDoc} /> : <Navigate to="/login" />} />
-      <Route path="*" element={<Navigate to="/" />} />
-    </Routes>
+    <Layout user={user} userDoc={userDoc}>
+      <Routes>
+        <Route path="/" element={<Dashboard user={user} userDoc={userDoc} />} />
+        <Route
+          path="/productos"
+          element={isAdmin ? <Productos /> : <Navigate to="/" />}
+        />
+        <Route path="/login" element={<Navigate to="/" />} />
+        <Route path="*" element={<Navigate to="/" />} />
+      </Routes>
+    </Layout>
   );
 }
