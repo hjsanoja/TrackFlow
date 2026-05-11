@@ -1,8 +1,11 @@
-"""
-Scraper de Farmatodo. Hernando Sanoja
-
-Lectura de CSV tolerante a UTF-8 / UTF-8-BOM / CP1252 / Latin-1.
-"""
+# Scraper de Farmatodo - version 4
+#
+# Mejoras respecto a v3:
+# - Lee productos_competencia desde Firestore (no del CSV)
+# - Filtro de cadena case-insensitive y tolerante a espacios
+# - Logs claros: cuantas filas hay, cuantas son Farmatodo, cuantas activas
+# - Cada URL marca su estado correctamente
+# - Si una URL falla, las demas siguen corriendo
 
 import csv
 import io
@@ -21,22 +24,17 @@ RESULTS_PATH = PROJECT_ROOT / "resultados.json"
 DEBUG_DIR = PROJECT_ROOT / "debug"
 
 
-def read_text_robust(path: Path) -> str:
+def read_text_robust(path):
     raw = path.read_bytes()
     for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
         try:
             return raw.decode(encoding)
         except UnicodeDecodeError:
             continue
-    raise RuntimeError(f"No pude decodificar {path.name}")
+    raise RuntimeError("No pude decodificar " + path.name)
 
 
-def parse_price(text: str) -> float | None:
-    """
-    Bs.262.18    -> 262.18
-    Bs.1.694.47  -> 1694.47
-    Regla: el ULTIMO punto es decimal, los demás son separadores de miles.
-    """
+def parse_price(text):
     if not text:
         return None
     cleaned = re.sub(r"[^\d.]", "", text.replace("Bs.", "").replace("Bs", ""))
@@ -44,14 +42,46 @@ def parse_price(text: str) -> float | None:
         return None
     if cleaned.count(".") > 1:
         parts = cleaned.split(".")
-        cleaned = f"{''.join(parts[:-1])}.{parts[-1]}"
+        cleaned = "".join(parts[:-1]) + "." + parts[-1]
     try:
         return float(cleaned)
     except ValueError:
         return None
 
 
-def scrape_url(page, url: str, marca: str) -> dict:
+def cargar_filas_de_firestore():
+    """Lee productos_competencia desde Firestore (fuente de verdad)."""
+    try:
+        from firebase_client import get_db
+        db = get_db()
+        snap = db.collection("productos_competencia").stream()
+        filas = []
+        for doc in snap:
+            data = doc.to_dict()
+            data["_doc_id"] = doc.id
+            filas.append(data)
+        print("Cargadas " + str(len(filas)) + " filas desde Firestore")
+        return filas
+    except Exception as e:
+        print("No pude cargar desde Firestore: " + str(e))
+        return None
+
+
+def cargar_filas_de_csv():
+    """Fallback: lee productos_competencia desde el CSV local."""
+    if not CSV_PATH.exists():
+        return []
+    text = read_text_robust(CSV_PATH)
+    sample = text[:2048]
+    delim = ";" if sample.count(";") > sample.count(",") else ","
+    filas = []
+    for row in csv.DictReader(io.StringIO(text), delimiter=delim):
+        filas.append(row)
+    print("Cargadas " + str(len(filas)) + " filas desde CSV local (fallback)")
+    return filas
+
+
+def scrape_url(page, url, marca):
     result = {
         "url": url,
         "marca": marca,
@@ -64,17 +94,24 @@ def scrape_url(page, url: str, marca: str) -> dict:
     }
 
     try:
-        print(f"   Cargando...", flush=True)
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        print("   Cargando...", flush=True)
+        try:
+            response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if response and response.status >= 400:
+                result["error"] = "HTTP " + str(response.status)
+                return result
+        except PlaywrightTimeout:
+            result["error"] = "Timeout cargando la pagina"
+            return result
 
-        print(f"   Esperando que cargue contenido...", flush=True)
+        print("   Esperando contenido...", flush=True)
         try:
             page.wait_for_load_state("networkidle", timeout=15000)
         except PlaywrightTimeout:
             pass
         time.sleep(2)
 
-        print(f"   Extrayendo datos...", flush=True)
+        print("   Extrayendo datos...", flush=True)
         data = page.evaluate("""
             () => {
                 const active = document.querySelector('span.product-purchase__price--active');
@@ -98,47 +135,78 @@ def scrape_url(page, url: str, marca: str) -> dict:
             result["tiene_descuento"] = True
         elif precio_activo is not None:
             result["precio_full_bs"] = precio_activo
-            result["tiene_descuento"] = False
         else:
-            result["error"] = "No se encontraron los selectores de precio"
-            DEBUG_DIR.mkdir(exist_ok=True)
-            try:
-                shot = DEBUG_DIR / f"sin_precio_{marca.replace(' ', '_')}.png"
-                page.screenshot(path=str(shot), full_page=True)
-                print(f"   Screenshot guardado: {shot}")
-            except Exception:
-                pass
+            result["error"] = "Precio no encontrado en la pagina"
 
     except PlaywrightTimeout as e:
-        result["error"] = f"Timeout: {e}"
+        result["error"] = "Timeout: " + str(e)
     except Exception as e:
-        result["error"] = f"{type(e).__name__}: {e}"
+        result["error"] = type(e).__name__ + ": " + str(e)
 
     return result
 
 
 def main():
-    if not CSV_PATH.exists():
-        print(f"ERROR: no encuentro {CSV_PATH}")
+    # Primero intentamos Firestore (lo que se ve en el panel),
+    # caemos al CSV si falla.
+    filas_todas = cargar_filas_de_firestore()
+    if filas_todas is None:
+        filas_todas = cargar_filas_de_csv()
+
+    if not filas_todas:
+        print("ERROR: no hay filas en Firestore ni en CSV")
         sys.exit(1)
 
-    text = read_text_robust(CSV_PATH)
-    sample = text[:2048]
-    delim = ";" if sample.count(";") > sample.count(",") else ","
+    # FILTRO ROBUSTO: case-insensitive, tolerante a espacios extra
+    filas_farmatodo = []
+    filas_otras_cadenas = []
+    filas_inactivas = []
 
-    filas = []
-    for row in csv.DictReader(io.StringIO(text), delimiter=delim):
-        if (
-            row.get("cadena", "").strip().lower() == "farmatodo"
-            and row.get("activo", "").strip().lower() == "si"
-        ):
-            filas.append(row)
+    for fila in filas_todas:
+        cadena_raw = fila.get("cadena", "")
+        cadena_norm = str(cadena_raw).strip().lower()
 
-    if not filas:
-        print("No hay filas de Farmatodo activas en el CSV.")
+        activo_raw = fila.get("activo", "")
+        if isinstance(activo_raw, bool):
+            es_activa = activo_raw
+        else:
+            es_activa = str(activo_raw).strip().lower() in ("si", "sí", "true", "1", "yes")
+
+        if not es_activa:
+            filas_inactivas.append(fila)
+            continue
+
+        if cadena_norm == "farmatodo":
+            filas_farmatodo.append(fila)
+        else:
+            filas_otras_cadenas.append(fila)
+
+    print("")
+    print("=" * 60)
+    print("RESUMEN DE FILAS:")
+    print("  Total en fuente:        " + str(len(filas_todas)))
+    print("  De Farmatodo activas:   " + str(len(filas_farmatodo)))
+    print("  De otras cadenas:       " + str(len(filas_otras_cadenas))
+          + " (ignoradas, scraper no implementado)")
+    print("  Inactivas:              " + str(len(filas_inactivas)))
+    print("=" * 60)
+
+    if filas_otras_cadenas:
+        print("")
+        print("Cadenas detectadas que no son Farmatodo:")
+        cadenas_unicas = set(str(f.get("cadena", "")) for f in filas_otras_cadenas)
+        for c in cadenas_unicas:
+            cnt = sum(1 for f in filas_otras_cadenas if str(f.get("cadena", "")) == c)
+            print("  - " + str(c) + ": " + str(cnt) + " URLs")
+        print("")
+
+    if not filas_farmatodo:
+        print("No hay URLs activas de Farmatodo para scrapear.")
         sys.exit(0)
 
-    print(f"Scrapeando {len(filas)} URLs de Farmatodo...\n")
+    print("")
+    print("Scrapeando " + str(len(filas_farmatodo)) + " URLs de Farmatodo...")
+    print("")
     inicio = time.time()
     resultados = []
 
@@ -155,25 +223,59 @@ def main():
         )
         page = context.new_page()
 
-        for i, fila in enumerate(filas, 1):
-            print(f"[{i}/{len(filas)}] {fila['marca']} ({fila['tipo']})", flush=True)
-            r = scrape_url(page, fila["url"], fila["marca"])
-            r["id_producto_propio"] = fila["id_producto_propio"]
-            r["cadena"] = fila["cadena"]
-            r["tipo"] = fila["tipo"]
+        for i, fila in enumerate(filas_farmatodo, 1):
+            marca = str(fila.get("marca", "")).strip() or "?"
+            tipo = str(fila.get("tipo", "")).strip() or "?"
+            url = str(fila.get("url", "")).strip()
+            id_prod = str(fila.get("id_producto_propio", "")).strip()
+
+            print("[" + str(i) + "/" + str(len(filas_farmatodo)) + "] "
+                  + marca + " (" + tipo + ") - " + id_prod, flush=True)
+
+            if not url:
+                print("   SKIP: URL vacia")
+                r = {
+                    "url": "",
+                    "marca": marca,
+                    "nombre": None,
+                    "precio_full_bs": None,
+                    "precio_desc_bs": None,
+                    "tiene_descuento": False,
+                    "scraped_at": datetime.now(timezone.utc).isoformat(),
+                    "error": "URL vacia",
+                }
+            else:
+                try:
+                    r = scrape_url(page, url, marca)
+                except Exception as e:
+                    print("   ERROR INESPERADO: " + str(e))
+                    r = {
+                        "url": url,
+                        "marca": marca,
+                        "nombre": None,
+                        "precio_full_bs": None,
+                        "precio_desc_bs": None,
+                        "tiene_descuento": False,
+                        "scraped_at": datetime.now(timezone.utc).isoformat(),
+                        "error": "Error inesperado: " + str(e),
+                    }
+
+            r["id_producto_propio"] = id_prod
+            r["cadena"] = "Farmatodo"
+            r["tipo"] = tipo
             resultados.append(r)
 
             if r["error"]:
-                print(f"   ERROR: {r['error']}\n")
+                print("   ERROR: " + r["error"])
             else:
-                print(f"   Nombre: {r['nombre']}")
                 if r["tiene_descuento"]:
                     pct = (1 - r["precio_desc_bs"] / r["precio_full_bs"]) * 100
-                    print(f"   Precio normal:    Bs {r['precio_full_bs']:,.2f}")
-                    print(f"   Precio descuento: Bs {r['precio_desc_bs']:,.2f}  (-{pct:.0f}%)")
+                    print("   OK: Bs " + "{:,.2f}".format(r["precio_full_bs"]) +
+                          " -> Bs " + "{:,.2f}".format(r["precio_desc_bs"]) +
+                          "  (-" + "{:.0f}".format(pct) + "%)")
                 else:
-                    print(f"   Precio: Bs {r['precio_full_bs']:,.2f}  (sin descuento)")
-                print()
+                    print("   OK: Bs " + "{:,.2f}".format(r["precio_full_bs"]))
+            print("")
 
         browser.close()
 
@@ -182,8 +284,10 @@ def main():
 
     duracion = time.time() - inicio
     ok = sum(1 for r in resultados if not r["error"])
-    print(f"Total: {duracion:.1f}s | {ok}/{len(resultados)} OK")
-    print(f"Resultados guardados en: {RESULTS_PATH}")
+    print("=" * 60)
+    print("Total: " + "{:.1f}".format(duracion) + "s | " +
+          str(ok) + "/" + str(len(resultados)) + " OK")
+    print("Resultados guardados en: " + str(RESULTS_PATH))
 
 
 if __name__ == "__main__":
