@@ -6,6 +6,7 @@ import { auth, db } from './firebase';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Productos from './pages/Productos';
+import Competencia from './pages/Competencia';
 import Layout from './components/Layout';
 
 function emailToDocId(email) {
@@ -73,10 +74,8 @@ export default function App() {
     <Layout user={user} userDoc={userDoc}>
       <Routes>
         <Route path="/" element={<Dashboard user={user} userDoc={userDoc} />} />
-        <Route
-          path="/productos"
-          element={isAdmin ? <Productos /> : <Navigate to="/" />}
-        />
+        <Route path="/productos" element={isAdmin ? <Productos /> : <Navigate to="/" />} />
+        <Route path="/competencia" element={isAdmin ? <Competencia /> : <Navigate to="/" />} />
         <Route path="/login" element={<Navigate to="/" />} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
