@@ -7,6 +7,8 @@ import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Productos from './pages/Productos';
 import Competencia from './pages/Competencia';
+import Cadenas from './pages/Cadenas';
+import Usuarios from './pages/Usuarios';
 import Layout from './components/Layout';
 
 function emailToDocId(email) {
@@ -76,6 +78,8 @@ export default function App() {
         <Route path="/" element={<Dashboard user={user} userDoc={userDoc} />} />
         <Route path="/productos" element={isAdmin ? <Productos /> : <Navigate to="/" />} />
         <Route path="/competencia" element={isAdmin ? <Competencia /> : <Navigate to="/" />} />
+        <Route path="/cadenas" element={isAdmin ? <Cadenas /> : <Navigate to="/" />} />
+        <Route path="/usuarios" element={isAdmin ? <Usuarios userDoc={userDoc} /> : <Navigate to="/" />} />
         <Route path="/login" element={<Navigate to="/" />} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
